@@ -1,42 +1,56 @@
-use core::fmt;
-use sbi_rt::legacy::console_putchar;
+// 控制台输出模块
+// 使用封装的SBI API实现控制台功能
 
+use core::fmt;
+use crate::util::sbi;
+
+/// 格式化输出函数
 pub fn print(args: fmt::Arguments) {
     use core::fmt::Write;
     Stdout.write_fmt(args).unwrap();
 }
 
-// 直接输出字符串，不依赖于格式化
+/// 直接输出字符串
+/// 
+/// # 参数
+/// * `s` - 要输出的字符串
 pub fn print_str(s: &str) {
-    for c in s.chars() {
-        console_putchar(c as usize);
-    }
+    let _ = sbi::console::puts(s);
 }
 
-// 直接输出数字
+/// 输出单个字符
+/// 
+/// # 参数
+/// * `ch` - 要输出的字符
+pub fn print_char(ch: char) {
+    let _ = sbi::console::putchar(ch);
+}
+
+/// 输出十进制数字
+/// 
+/// # 参数
+/// * `num` - 要输出的数字
 pub fn print_num(num: usize) {
-    // 简单的数字转字符串
-    if num == 0 {
-        console_putchar('0' as usize);
-        return;
-    }
-    
-    let mut n = num;
-    let mut buf = [0u8; 20]; // 足够存储64位整数
-    let mut i = 0;
-    
-    while n > 0 {
-        buf[i] = (n % 10) as u8 + b'0';
-        n /= 10;
-        i += 1;
-    }
-    
-    while i > 0 {
-        i -= 1;
-        console_putchar(buf[i] as usize);
-    }
+    let _ = sbi::console::putnum(num, 10);
 }
 
+/// 输出十六进制数字
+/// 
+/// # 参数
+/// * `num` - 要输出的数字
+pub fn print_hex(num: usize) {
+    let _ = sbi::console::putnum(num, 16);
+}
+
+/// 输出八进制数字
+/// 
+/// # 参数
+/// * `num` - 要输出的数字
+pub fn print_oct(num: usize) {
+    let _ = sbi::console::putnum(num, 8);
+}
+
+/// 标准输出结构体，实现Write trait以支持格式化输出
 struct Stdout;
 
 impl core::fmt::Write for Stdout {
@@ -46,6 +60,7 @@ impl core::fmt::Write for Stdout {
     }
 }
 
+/// print宏 - 格式化输出
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => {
@@ -53,6 +68,7 @@ macro_rules! print {
     };
 }
 
+/// println宏 - 格式化输出并换行
 #[macro_export]
 macro_rules! println {
     () => {
@@ -60,5 +76,44 @@ macro_rules! println {
     };
     ($($arg:tt)*) => {
         $crate::print!("{}\n", format_args!($($arg)*))
+    };
+}
+
+/// 调试输出宏 - 带有文件和行号信息
+#[macro_export]
+macro_rules! debug_print {
+    ($($arg:tt)*) => {
+        $crate::print!("[{}:{}] ", file!(), line!());
+        $crate::println!($($arg)*);
+    };
+}
+
+/// 错误输出宏 - 红色高亮显示
+#[macro_export]
+macro_rules! error_print {
+    ($($arg:tt)*) => {
+        $crate::print!("\x1b[31m[ERROR] ");  // 红色
+        $crate::print!($($arg)*);
+        $crate::print!("\x1b[0m\n");         // 重置颜色
+    };
+}
+
+/// 警告输出宏 - 黄色高亮显示  
+#[macro_export]
+macro_rules! warn_print {
+    ($($arg:tt)*) => {
+        $crate::print!("\x1b[33m[WARN] ");   // 黄色
+        $crate::print!($($arg)*);
+        $crate::print!("\x1b[0m\n");         // 重置颜色
+    };
+}
+
+/// 信息输出宏 - 绿色高亮显示
+#[macro_export]
+macro_rules! info_print {
+    ($($arg:tt)*) => {
+        $crate::print!("\x1b[32m[INFO] ");   // 绿色
+        $crate::print!($($arg)*);
+        $crate::print!("\x1b[0m\n");         // 重置颜色
     };
 }
