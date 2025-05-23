@@ -11,41 +11,26 @@ pub fn print(args: fmt::Arguments) {
 }
 
 /// 直接输出字符串
-/// 
-/// # 参数
-/// * `s` - 要输出的字符串
 pub fn print_str(s: &str) {
     let _ = sbi::console::puts(s);
 }
 
 /// 输出单个字符
-/// 
-/// # 参数
-/// * `ch` - 要输出的字符
 pub fn print_char(ch: char) {
     let _ = sbi::console::putchar(ch);
 }
 
 /// 输出十进制数字
-/// 
-/// # 参数
-/// * `num` - 要输出的数字
 pub fn print_num(num: usize) {
     let _ = sbi::console::putnum(num, 10);
 }
 
 /// 输出十六进制数字
-/// 
-/// # 参数
-/// * `num` - 要输出的数字
 pub fn print_hex(num: usize) {
     let _ = sbi::console::putnum(num, 16);
 }
 
 /// 输出八进制数字
-/// 
-/// # 参数
-/// * `num` - 要输出的数字
 pub fn print_oct(num: usize) {
     let _ = sbi::console::putnum(num, 8);
 }
@@ -92,9 +77,9 @@ macro_rules! debug_print {
 #[macro_export]
 macro_rules! error_print {
     ($($arg:tt)*) => {
-        $crate::print!("\x1b[31m[ERROR] ");  // 红色
+        $crate::print!("\x1b[31m[ERROR] ");
         $crate::print!($($arg)*);
-        $crate::print!("\x1b[0m\n");         // 重置颜色
+        $crate::print!("\x1b[0m\n");
     };
 }
 
@@ -102,9 +87,9 @@ macro_rules! error_print {
 #[macro_export]
 macro_rules! warn_print {
     ($($arg:tt)*) => {
-        $crate::print!("\x1b[33m[WARN] ");   // 黄色
+        $crate::print!("\x1b[33m[WARN] ");
         $crate::print!($($arg)*);
-        $crate::print!("\x1b[0m\n");         // 重置颜色
+        $crate::print!("\x1b[0m\n");
     };
 }
 
@@ -112,8 +97,8 @@ macro_rules! warn_print {
 #[macro_export]
 macro_rules! info_print {
     ($($arg:tt)*) => {
-        $crate::print!("\x1b[32m[INFO] ");   // 绿色
+        $crate::print!("\x1b[32m[INFO] ");
         $crate::print!($($arg)*);
-        $crate::print!("\x1b[0m\n");         // 重置颜色
+        $crate::print!("\x1b[0m\n");
     };
 }
