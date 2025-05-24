@@ -1,3 +1,5 @@
+// nt_rustos/src/lib.rs
+
 #![no_std]
 #![feature(panic_info_message)]
 #![feature(alloc_error_handler)]
@@ -8,14 +10,16 @@ extern crate alloc;
 // 重新导出常用的alloc类型和宏
 pub use alloc::vec::Vec;
 pub use alloc::string::String;
-pub use alloc::format;
-pub use alloc::vec;
+pub use alloc::format; // 确保 format 宏可用
+pub use alloc::vec;    // 确保 vec! 宏可用
+pub use alloc::boxed::Box; // 确保 Box 可用
 
-// 导出核心模块
+// 声明内核模块
 pub mod console;
 pub mod util;
 pub mod init;
 pub mod test;
+pub mod trap; // 新增：声明 trap 子系统模块
 
 use core::panic::PanicInfo;
 use core::arch::asm;
@@ -30,34 +34,54 @@ pub const STACK_SIZE: usize = 4096 * 4;
 /// Panic处理器 - 当发生panic时调用
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    // 输出panic信息
-    error_print!("Kernel panic!");
-    
+    // 尝试禁用中断，防止嵌套Panic或进一步错误
+    unsafe { asm!("csrci sstatus, 1 << 1") };
+
+    error_print!("KERNEL PANIC!");
+
     if let Some(location) = info.location() {
-        error_print!("Location: {}:{}", location.file(), location.line());
+        error_print!("  Location: {}:{}", location.file(), location.line());
     }
-    
+
     if let Some(message) = info.message() {
-        error_print!("Message: {}", message);
+        error_print!("  Message: {}", message);
+    } else {
+        error_print!("  No panic message available.");
     }
-    
+
+    // 如果错误处理系统（特别是ErrorManager的panic_mode）已经初始化，则利用它
+    // 这需要trap系统已经初始化
+    if trap::infrastructure::di::is_initialized() {
+        trap::infrastructure::di::with_trap_system(|ts| {
+            if !ts.error_manager().is_panic_mode() {
+                 ts.error_manager().enter_panic_mode(); // 进入Panic模式
+            }
+            // 可以在这里记录Panic到ErrorLog，如果ErrorManager支持
+        });
+    }
+
+
     // 如果分配器已初始化，打印内存状态
     if init::alloc::is_initialized() {
         warn_print!("Memory state at panic:");
         if let Some((total, used, free)) = init::alloc::usage_summary() {
-            error_print!("  Total: {} KB, Used: {} KB, Free: {} KB", 
+            error_print!("  Total: {} KB, Used: {} KB, Free: {} KB",
                         total / 1024, used / 1024, free / 1024);
         }
-        
-        // 尝试获取详细统计
+
         if let Some(stats) = init::alloc::stats() {
-            error_print!("  Allocations: {}, Deallocations: {}", 
+            error_print!("  Allocations: {}, Deallocations: {}",
                         stats.total_allocs, stats.total_frees);
-            error_print!("  Usage: {}%, Fragmentation: {}%", 
-                        stats.usage_percent(), stats.fragmentation_estimate());
+            if stats.total_size > 0 { // 避免除以零
+                error_print!("  Usage: {}%, Fragmentation: {}%",
+                            stats.usage_percent(), stats.fragmentation_estimate());
+            }
         }
+    } else {
+        error_print!("  Allocator not initialized. Cannot report memory state.");
     }
-    
+
+    error_print!("System halted.");
     // 无限循环，停止系统
     loop {
         unsafe {
@@ -72,358 +96,181 @@ pub unsafe fn clear_bss(stack_bottom: usize, stack_top: usize) {
         fn sbss();
         fn ebss();
     }
-    
+
     let bss_start = sbss as usize;
     let bss_end = ebss as usize;
-    
-    // 清理从 BSS 开始到栈底的区域
-    for addr in bss_start..stack_bottom {
-        core::ptr::write_volatile(addr as *mut u8, 0);
+
+    // 清理从 BSS 开始到栈底的区域 (如果栈在BSS之前或部分重叠则跳过)
+    if bss_start < stack_bottom {
+        for addr in bss_start..core::cmp::min(bss_end, stack_bottom) {
+            core::ptr::write_volatile(addr as *mut u8, 0);
+        }
     }
-    
-    // 清理从栈顶到 BSS 结束的区域
-    for addr in stack_top..bss_end {
-        core::ptr::write_volatile(addr as *mut u8, 0);
+
+    // 清理从栈顶到 BSS 结束的区域 (如果栈在BSS之后或部分重叠则跳过)
+    if stack_top < bss_end {
+        for addr in core::cmp::max(bss_start, stack_top)..bss_end {
+            core::ptr::write_volatile(addr as *mut u8, 0);
+        }
     }
 }
 
+
 /// 系统初始化
 pub fn init() {
-    info_print!("NT RustOS starting...");
-    info_print!("Stack size: {} bytes", STACK_SIZE);
-    info_print!("BSS cleared successfully");
-    
-    // 初始化早期分配器
-    // 假设在BSS段之后有2MB空间可用于早期堆
+    info_print!("NT RustOS Initializing...");
+
+    // 1. 初始化早期分配器 (必须首先完成)
     extern "C" {
         fn end(); // 链接器提供的内核结束地址
     }
-    
+
     let heap_start = unsafe { end as usize };
     let heap_start_aligned = (heap_start + 0xF) & !0xF; // 16字节对齐
-    let heap_size = 2 * 1024 * 1024; // 2MB - 增加堆大小以支持更多动态分配
-    
+    let heap_size = 2 * 1024 * 1024; // 2MB
+
     match init::alloc::init(heap_start_aligned, heap_size) {
         Ok(_) => {
-            info_print!("Early allocator initialized at 0x{:x}", heap_start_aligned);
-            
-            // 打印早期分配器详细状态
+            info_print!("Early Allocator initialized at 0x{:x} (Size: {} KB).", heap_start_aligned, heap_size / 1024);
             if let Some(stats) = init::alloc::stats() {
-                info_print!("Early heap initialized successfully:");
-                info_print!("  Total: {} KB", stats.total_size / 1024);
-                info_print!("  Available: {} KB", stats.free_size / 1024);
-                info_print!("  Overhead: {} bytes", stats.total_size - stats.free_size);
+                info_print!("  Initial Heap: Total: {} KB, Free: {} KB, Overhead: {} bytes",
+                            stats.total_size / 1024,
+                            stats.free_size / 1024,
+                            stats.total_size - stats.free_size);
             }
-            
-            // 执行分配器健康检查
-            if let Some(health) = init::alloc::health_check() {
-                if health.is_healthy() {
-                    info_print!("Allocator health check: PASSED");
-                } else {
-                    warn_print!("Allocator health check: ISSUES DETECTED");
-                    health.print_report();
-                }
-            }
-            
-            // 测试动态数据结构支持
-            test_dynamic_structures();
         }
         Err(e) => {
-            error_print!("Failed to initialize early allocator: {:?}", e);
-            // 早期分配器初始化失败是致命错误
-            panic!("Cannot continue without early allocator");
+            // Panic时控制台可能还未完全可用，尝试基础输出
+            crate::console::print_str("FATAL: Failed to initialize early allocator: ");
+            // 无法使用复杂的打印，因为分配器失败
+            // crate::console::print_str(format!("{:?}", e).as_str()); // format! 需要分配
+            crate::console::print_str("Halting.\n");
+            loop { unsafe { asm!("wfi"); } } // 系统无法继续
         }
     }
-    
-    // 显示SBI系统信息
+
+    // 2. 初始化 Trap 子系统 (依赖分配器)
+    // 使用 Direct 模式，因为 Vectored 模式需要更复杂的硬件支持和设置
+    trap::init(trap::TrapMode::Direct);
+    info_print!("Trap Subsystem initialized.");
+
+    // 3. 测试动态数据结构 (依赖分配器和trap系统错误处理)
+    test_dynamic_structures();
+
+    // 4. 显示SBI系统信息 (可选，但有助于调试)
     util::sbi::info::print_sbi_info();
-    
-    info_print!("System initialization completed");
+
+    info_print!("System Core Initialization Completed.");
 }
 
 /// 测试动态数据结构支持
 fn test_dynamic_structures() {
     info_print!("Testing dynamic data structures...");
-    
-    // 测试基本Vec操作
+
     let mut test_vec = Vec::new();
     for i in 0..10 {
         test_vec.push(i);
     }
-    
-    info_print!("Vec test: created vector with {} elements", test_vec.len());
-    
-    // 测试String操作
+    if test_vec.len() == 10 && test_vec[9] == 9 {
+        debug_print!("  Vec test: PASSED ({} elements)", test_vec.len());
+    } else {
+        error_print!("  Vec test: FAILED");
+    }
+
+
     let mut test_string = String::from("Hello");
-    test_string.push_str(", World!");
-    info_print!("String test: '{}'", test_string);
-    
-    // 测试自定义智能指针
+    test_string.push_str(", RustOS!");
+    if test_string == "Hello, RustOS!" {
+        debug_print!("  String test: PASSED ('{}')", test_string);
+    } else {
+        error_print!("  String test: FAILED");
+    }
+
     if let Some(boxed_value) = init::alloc::global::advanced::EarlyBox::new(42u32) {
-        info_print!("EarlyBox test: value = {}", *boxed_value);
-        
-        // 设置分配用途
-        if let Err(e) = boxed_value.set_purpose(init::alloc::AllocPurpose::Testing) {
-            warn_print!("Failed to set purpose: {:?}", e);
+        if *boxed_value == 42 {
+            debug_print!("  EarlyBox test: PASSED (value = {})", *boxed_value);
+        } else {
+            error_print!("  EarlyBox test: FAILED");
         }
+    } else {
+        error_print!("  EarlyBox allocation: FAILED");
     }
-    
-    // 测试自定义Vec
-    let mut custom_vec = init::alloc::global::advanced::EarlyVec::new();
-    for i in 0..5 {
-        custom_vec.push(i * 10);
-    }
-    info_print!("EarlyVec test: {} elements", custom_vec.len());
-    
-    info_print!("Dynamic structures test completed");
-    
-    // 打印测试后的内存状态
-    if let Some(stats) = init::alloc::stats() {
-        info_print!("Memory after dynamic tests:");
-        info_print!("  Used: {} KB ({}%)", stats.used_size / 1024, stats.usage_percent());
-        info_print!("  Allocations: {}", stats.total_allocs);
-    }
+
+    info_print!("Dynamic structures test completed.");
 }
 
 /// 主循环 - 系统的核心循环
 pub fn main_loop() -> ! {
-    info_print!("Entering main loop");
-    
-    // 创建内存快照
-    let snapshot_before = init::alloc::create_snapshot();
-    
+    info_print!("Entering main operating loop...");
+
     // 运行所有测试
-    info_print!("Running comprehensive tests...");
+    info_print!("Running comprehensive test suites...");
     test::run_all_tests();
-    info_print!("All tests completed");
-    
-    // 创建测试后的快照并比较
-    let snapshot_after = init::alloc::create_snapshot();
-    if let (Some(ref before), Some(ref after)) = (&snapshot_before, &snapshot_after) {
-        info_print!("Memory usage comparison:");
-        let comparison = before.compare(after);
-        comparison.print();
-    }
-    
-    // 执行维护任务
-    info_print!("Running allocator maintenance...");
-    if let Err(e) = init::alloc::maintenance() {
-        warn_print!("Maintenance failed: {:?}", e);
-    }
-    
+    info_print!("All test suites completed.");
+
     // 打印最终内存状态
     init::alloc::print_status();
-    
-    // 演示高级内存管理功能
-    demonstrate_advanced_features();
-    
-    // 主循环 - 目前只是等待中断
-    info_print!("System ready, entering idle loop");
+
+    info_print!("System ready. Entering idle loop.");
     loop {
         unsafe {
-            asm!("wfi"); // 等待中断，降低功耗
+            // 等待中断，如果没有中断发生，wfi 将使处理器进入低功耗状态
+            // 直到下一个中断到达。
+            asm!("wfi");
         }
-    }
-}
-
-/// 演示高级内存管理功能
-fn demonstrate_advanced_features() {
-    info_print!("Demonstrating advanced memory management features...");
-    
-    // 演示不同用途的内存分配
-    demonstrate_purpose_allocation();
-    
-    // 演示内存快照和比较
-    demonstrate_snapshots();
-    
-    // 演示紧急回收
-    demonstrate_emergency_reclaim();
-    
-    info_print!("Advanced features demonstration completed");
-}
-
-/// 演示按用途分配内存
-fn demonstrate_purpose_allocation() {
-    use init::alloc::AllocPurpose;
-    
-    info_print!("Testing purpose-based allocation...");
-    
-    // 分配不同用途的内存块
-    let purposes = [
-        (AllocPurpose::KernelStack, 4096),
-        (AllocPurpose::PageTable, 8192),
-        (AllocPurpose::NetworkBuffer, 1024),
-        (AllocPurpose::TempBuffer, 512),
-        (AllocPurpose::CacheBuffer, 2048),
-    ];
-    
-    let mut allocated_ptrs = Vec::new();
-    
-    for (purpose, size) in purposes.iter() {
-        if let Some(ptr) = alloc_with_purpose!(*size, *purpose) {
-            allocated_ptrs.push((ptr, *size));
-            debug_print!("Allocated {} bytes for {}", size, purpose.description());
-        } else {
-            warn_print!("Failed to allocate for {}", purpose.description());
-        }
-    }
-    
-    // 打印分配后的接管信息
-    if let Some(handover) = init::alloc::prepare_handover() {
-        info_print!("Purpose allocation results:");
-        let groups = handover.group_by_purpose();
-        for (purpose, count, size) in &groups {
-            if *count > 0 {
-                info_print!("  {}: {} blocks, {} bytes", 
-                           purpose.description(), count, size);
-            }
-        }
-        
-        info_print!("Reclaimable: {} bytes", handover.reclaimable_size());
-        info_print!("Critical: {} bytes", handover.critical_size());
-    }
-    
-    // 清理分配的内存
-    for (ptr, size) in allocated_ptrs {
-        if let Err(e) = init::alloc::dealloc_safe(ptr, size) {
-            warn_print!("Failed to deallocate: {:?}", e);
-        }
-    }
-}
-
-/// 演示内存快照功能
-fn demonstrate_snapshots() {
-    info_print!("Testing memory snapshot functionality...");
-    
-    // 创建第一个快照
-    let snapshot1 = init::alloc::create_snapshot();
-    
-    // 进行一些分配
-    let mut temp_allocations = Vec::new();
-    for i in 0..5 {
-        if let Some(ptr) = init::alloc::alloc(1024 * (i + 1)) {
-            temp_allocations.push((ptr, 1024 * (i + 1)));
-        }
-    }
-    
-    // 创建第二个快照
-    let snapshot2 = init::alloc::create_snapshot();
-    
-    // 比较快照
-    if let (Some(ref s1), Some(ref s2)) = (&snapshot1, &snapshot2) {
-        info_print!("Snapshot comparison results:");
-        let comparison = s1.compare(s2);
-        comparison.print();
-    }
-    
-    // 清理临时分配
-    for (ptr, size) in temp_allocations {
-        if let Err(e) = init::alloc::dealloc_safe(ptr, size) {
-            warn_print!("Failed to cleanup temp allocation: {:?}", e);
-        }
-    }
-}
-
-/// 演示紧急内存回收
-fn demonstrate_emergency_reclaim() {
-    info_print!("Testing emergency memory reclaim...");
-    
-    // 创建一些临时分配
-    let mut temp_ptrs = Vec::new();
-    for _ in 0..3 {
-        if let Some(ptr) = alloc_with_purpose!(2048, init::alloc::AllocPurpose::TempBuffer) {
-            temp_ptrs.push(ptr);
-        }
-    }
-    
-    // 执行紧急回收
-    let reclaimed = init::alloc::emergency_reclaim();
-    info_print!("Emergency reclaim identified {} bytes", reclaimed);
-    
-    // 在实际系统中，这些临时缓冲区可能会被自动回收
-    // 这里我们手动清理
-    for ptr in temp_ptrs {
-        if let Err(e) = init::alloc::dealloc_safe(ptr, 2048) {
-            warn_print!("Failed to cleanup temp buffer: {:?}", e);
-        }
+        // 当中断发生并处理完毕后，会从这里继续执行。
+        // 在一个更复杂的内核中，这里可能会检查调度队列等。
     }
 }
 
 /// 系统关闭
 pub fn shutdown() -> ! {
-    info_print!("System shutting down...");
-    
-    // 准备接管信息（用于调试或重启后恢复）
-    if let Some(handover) = init::alloc::prepare_handover() {
-        info_print!("Final system state prepared for handover");
-        handover.print_summary();
+    info_print!("System Shutting Down...");
+
+    if init::alloc::is_initialized() {
+        if let Some(handover) = init::alloc::prepare_handover() {
+            info_print!("Final system state prepared for handover.");
+            handover.print_summary();
+        }
+        if let Err(e) = init::alloc::freeze() {
+            error_print!("Failed to freeze allocator: {:?}", e);
+        }
+        init::alloc::print_status();
     }
-    
-    // 冻结分配器
-    if let Err(e) = init::alloc::freeze() {
-        error_print!("Failed to freeze allocator: {:?}", e);
-    }
-    
-    // 最终内存状态报告
-    init::alloc::print_status();
-    
-    info_print!("System shutdown sequence completed");
+
+    info_print!("Shutdown sequence completed. Calling SBI shutdown.");
     util::sbi::system::shutdown();
 }
 
 /// 系统重启
 pub fn reboot() -> ! {
-    info_print!("System rebooting...");
-    
-    // 执行重启前的清理
+    info_print!("System Rebooting...");
     if init::alloc::is_initialized() {
-        warn_print!("Performing pre-reboot cleanup...");
-        
-        // 执行最后的维护
-        if let Err(e) = init::alloc::maintenance() {
-            warn_print!("Pre-reboot maintenance failed: {:?}", e);
-        }
-        
-        // 冻结分配器
         if let Err(e) = init::alloc::freeze() {
             warn_print!("Failed to freeze allocator before reboot: {:?}", e);
         }
     }
-    
-    info_print!("Reboot sequence initiated");
+    info_print!("Reboot sequence initiated. Calling SBI reboot.");
     util::sbi::system::reboot();
 }
 
 /// 获取系统内存信息摘要
 pub fn get_memory_info() -> MemoryInfo {
+    let (total_size, used_size, free_size) = init::alloc::usage_summary().unwrap_or((0, 0, 0));
+    let (alloc_count, dealloc_count) = if let Some(stats) = init::alloc::stats() {
+        (stats.total_allocs, stats.total_frees)
+    } else {
+        (0, 0)
+    };
+
     MemoryInfo {
-        total_size: if let Some((total, _, _)) = init::alloc::usage_summary() {
-            total
-        } else {
-            0
-        },
-        used_size: if let Some((_, used, _)) = init::alloc::usage_summary() {
-            used
-        } else {
-            0
-        },
-        free_size: if let Some((_, _, free)) = init::alloc::usage_summary() {
-            free
-        } else {
-            0
-        },
+        total_size,
+        used_size,
+        free_size,
         allocator_initialized: init::alloc::is_initialized(),
         allocator_enabled: init::alloc::is_enabled(),
-        allocation_count: if let Some(stats) = init::alloc::stats() {
-            stats.total_allocs
-        } else {
-            0
-        },
-        deallocation_count: if let Some(stats) = init::alloc::stats() {
-            stats.total_frees
-        } else {
-            0
-        },
+        allocation_count: alloc_count,
+        deallocation_count: dealloc_count,
     }
 }
 
@@ -443,19 +290,17 @@ impl MemoryInfo {
     /// 打印内存信息
     pub fn print(&self) {
         println!("=== System Memory Information ===");
-        println!("Total: {} KB", self.total_size / 1024);
-        println!("Used:  {} KB ({}%)", 
-                 self.used_size / 1024,
-                 if self.total_size > 0 { self.used_size * 100 / self.total_size } else { 0 });
-        println!("Free:  {} KB", self.free_size / 1024);
-        println!("Allocator: {} ({})", 
-                 if self.allocator_initialized { "Initialized" } else { "Not Initialized" },
-                 if self.allocator_enabled { "Enabled" } else { "Disabled" });
-        println!("Operations: {} allocs, {} deallocs", 
+        println!("  Total: {} KB", self.total_size / 1024);
+        let usage_percent = if self.total_size > 0 { self.used_size * 100 / self.total_size } else { 0 };
+        println!("  Used:  {} KB ({}%)", self.used_size / 1024, usage_percent);
+        println!("  Free:  {} KB", self.free_size / 1024);
+        println!("  Allocator: Initialized ({}), Enabled ({})",
+                 self.allocator_initialized, self.allocator_enabled);
+        println!("  Operations: {} allocs, {} deallocs",
                  self.allocation_count, self.deallocation_count);
         println!("=================================");
     }
-    
+
     /// 获取使用率百分比
     pub fn usage_percent(&self) -> u8 {
         if self.total_size == 0 {
@@ -464,11 +309,11 @@ impl MemoryInfo {
             ((self.used_size * 100) / self.total_size) as u8
         }
     }
-    
+
     /// 检查内存是否健康
     pub fn is_healthy(&self) -> bool {
-        self.allocator_initialized && 
-        self.usage_percent() < 90 &&
-        self.allocation_count >= self.deallocation_count
+        self.allocator_initialized &&
+        self.usage_percent() < 95 && // 允许更高的使用率，90%可能过于保守
+        self.allocation_count >= self.deallocation_count // 基本的泄漏检查
     }
 }
