@@ -4,7 +4,7 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::{self, NonNull};
 use super::allocator::{ThreadSafeEarlyAllocator, AllocError};
-use super::handover::AllocPurpose;
+use super::handover::{AllocPurpose, HandoverInfo};
 use crate::{error_print, warn_print, debug_print};
 
 /// 全局早期分配器实例
@@ -41,7 +41,7 @@ impl EarlyGlobalAllocator {
     }
     
     /// 准备接管
-    pub fn prepare_handover(&self) -> Option<super::handover::HandoverInfo> {
+    pub fn prepare_handover(&self) -> Option<advanced::EarlyBox<HandoverInfo>> {
         ALLOCATOR_INSTANCE.prepare_handover()
     }
     
@@ -268,6 +268,8 @@ pub mod advanced {
     }
     
     /// 智能指针分配器（简化版本）
+    // [修改] 为 EarlyBox 添加 #[derive(Debug)]
+    #[derive(Debug)]
     pub struct EarlyBox<T> {
         ptr: NonNull<T>,
     }

@@ -7,6 +7,8 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::{println, debug_print, warn_print, error_print};
 use super::metadata::{AllocStats, BLOCK_MAGIC};
 use super::handover::{HandoverInfo, AllocatedBlock, AllocPurpose, MAX_TRACKED_BLOCKS, MemoryPermissions};
+// [修改] 引入您自己的智能指针
+use super::global::advanced;
 
 // 分配器错误类型
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -125,27 +127,25 @@ impl EarlyAllocator {
     }
     
     /// 准备接管信息
-    pub fn prepare_handover(&mut self) -> HandoverInfo {
+    // [修改] 返回值变为 Option<EarlyBox<HandoverInfo>>
+    pub fn prepare_handover(&mut self) -> Option<advanced::EarlyBox<HandoverInfo>> {
         let stats = self.stats();
         
-        // 简化实现：不跟踪具体的已分配块
-        let allocated_blocks = [AllocatedBlock {
-            addr: 0,
-            size: 0,
-            purpose: AllocPurpose::Unknown,
-            alloc_id: 0,
-            timestamp: get_timestamp(),
-            permissions: MemoryPermissions::READ_WRITE,
-            alignment: 8,
-            reserved: [0; 2],
-        }; MAX_TRACKED_BLOCKS];
-        
-        HandoverInfo {
+        let info = HandoverInfo {
             version: super::handover::HANDOVER_PROTOCOL_VERSION,
             magic: super::handover::HANDOVER_MAGIC,
             heap_start: self.heap_start,
             heap_end: self.heap_end,
-            allocated_blocks,
+            allocated_blocks: [AllocatedBlock {
+                addr: 0,
+                size: 0,
+                purpose: AllocPurpose::Unknown,
+                alloc_id: 0,
+                timestamp: get_timestamp(),
+                permissions: MemoryPermissions::READ_WRITE,
+                alignment: 8,
+                reserved: [0; 2],
+            }; MAX_TRACKED_BLOCKS],
             allocated_count: 0,
             statistics: stats,
             allocator_state: super::handover::AllocatorState {
@@ -163,7 +163,10 @@ impl EarlyAllocator {
             },
             handover_timestamp: get_timestamp(),
             checksum: 0,
-        }
+        };
+
+        // [修改] 将创建的info对象放到堆上
+        advanced::EarlyBox::new(info)
     }
     
     /// 冻结分配器
@@ -230,8 +233,9 @@ impl ThreadSafeEarlyAllocator {
         self.allocator.lock().as_ref().map(|a| a.stats())
     }
     
-    pub fn prepare_handover(&self) -> Option<HandoverInfo> {
-        self.allocator.lock().as_mut().map(|a| a.prepare_handover())
+    // [修改] 返回值类型同步修改
+    pub fn prepare_handover(&self) -> Option<advanced::EarlyBox<HandoverInfo>> {
+        self.allocator.lock().as_mut().and_then(|a| a.prepare_handover())
     }
     
     pub fn freeze(&self) -> Result<(), AllocError> {

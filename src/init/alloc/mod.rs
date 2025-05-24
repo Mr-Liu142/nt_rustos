@@ -8,6 +8,7 @@ pub mod global;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::{error_print, warn_print, info_print, debug_print, println};
+use crate::init::alloc::global::advanced;
 
 // 从子模块导出类型
 pub use self::allocator::{EarlyAllocator, AllocError, ThreadSafeEarlyAllocator};
@@ -350,7 +351,7 @@ pub fn health_check() -> Option<HealthStatus> {
 /// 
 /// # 返回值
 /// 返回接管信息，如果分配器未初始化则返回None
-pub fn prepare_handover() -> Option<HandoverInfo> {
+pub fn prepare_handover() -> Option<advanced::EarlyBox<HandoverInfo>> {
     if !is_initialized() {
         warn_print!("Cannot prepare handover: allocator not initialized");
         return None;
@@ -505,11 +506,11 @@ pub fn create_snapshot() -> Option<MemorySnapshot> {
 }
 
 /// 内存快照
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MemorySnapshot {
     pub timestamp: u64,
     pub statistics: AllocStats,
-    pub handover_info: HandoverInfo,
+    pub handover_info: advanced::EarlyBox<HandoverInfo>,
 }
 
 impl MemorySnapshot {

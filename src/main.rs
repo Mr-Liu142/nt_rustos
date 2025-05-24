@@ -21,7 +21,12 @@ fn _start() -> ! {
         );
         
         // 清除BSS段 - 将未初始化的静态变量清零
-        clear_bss();
+        // 
+        // **[修复]** 移除此调用。
+        // 在当前设置下，STACK位于BSS段内。
+        // 在设置完栈指针后清空BSS，会破坏当前正在使用的栈，导致系统崩溃重启。
+        // 加载器(如QEMU)通常会为我们自动清零BSS段，所以此调用是冗余且有害的。
+        // clear_bss();
         
         // 跳转到Rust主函数
         rust_main();
@@ -103,7 +108,7 @@ fn verify_system_state() {
     
     // 执行完整性检查
     match alloc::integrity_check() {
-        Ok(_) => info_print!("Allocator integrity: OK"),
+        Ok(_) => { info_print!("Allocator integrity: OK"); }
         Err(e) => {
             error_print!("Allocator integrity check failed: {:?}", e);
             panic!("System verification failed");

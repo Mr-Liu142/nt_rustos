@@ -193,9 +193,10 @@ pub fn main_loop() -> ! {
     info_print!("All tests completed");
     
     // 创建测试后的快照并比较
-    if let (Some(before), Some(after)) = (snapshot_before, init::alloc::create_snapshot()) {
+    let snapshot_after = init::alloc::create_snapshot();
+    if let (Some(ref before), Some(ref after)) = (&snapshot_before, &snapshot_after) {
         info_print!("Memory usage comparison:");
-        let comparison = before.compare(&after);
+        let comparison = before.compare(after);
         comparison.print();
     }
     
@@ -304,9 +305,9 @@ fn demonstrate_snapshots() {
     let snapshot2 = init::alloc::create_snapshot();
     
     // 比较快照
-    if let (Some(s1), Some(s2)) = (snapshot1, snapshot2) {
+    if let (Some(ref s1), Some(ref s2)) = (&snapshot1, &snapshot2) {
         info_print!("Snapshot comparison results:");
-        let comparison = s1.compare(&s2);
+        let comparison = s1.compare(s2);
         comparison.print();
     }
     
