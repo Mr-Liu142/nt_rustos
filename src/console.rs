@@ -67,38 +67,38 @@ macro_rules! println {
 /// 调试输出宏 - 带有文件和行号信息
 #[macro_export]
 macro_rules! debug_print {
-    ($($arg:tt)*) => {
+    ($($arg:tt)*) => {{
         $crate::print!("[{}:{}] ", file!(), line!());
         $crate::println!($($arg)*);
-    };
+    }};
 }
 
 /// 错误输出宏 - 红色高亮显示
 #[macro_export]
 macro_rules! error_print {
-    ($($arg:tt)*) => {
+    ($($arg:tt)*) => {{
         $crate::print!("\x1b[31m[ERROR] ");
         $crate::print!($($arg)*);
         $crate::print!("\x1b[0m\n");
-    };
+    }};
 }
 
-/// 警告输出宏 - 黄色高亮显示  
+/// 警告输出宏 - 黄色高亮显示
 #[macro_export]
 macro_rules! warn_print {
-    ($($arg:tt)*) => {
+    ($($arg:tt)*) => {{
         $crate::print!("\x1b[33m[WARN] ");
         $crate::print!($($arg)*);
         $crate::print!("\x1b[0m\n");
-    };
+    }};
 }
 
 /// 信息输出宏 - 绿色高亮显示
 #[macro_export]
 macro_rules! info_print {
-    ($($arg:tt)*) => {
+    ($($arg:tt)*) => {{
         $crate::print!("\x1b[32m[INFO] ");
         $crate::print!($($arg)*);
         $crate::print!("\x1b[0m\n");
-    };
+    }};
 }
