@@ -35,8 +35,12 @@ pub struct BlockHeader {
     /// 分配用途
     pub purpose: AllocPurpose,
     
-    /// 填充字节，确保头部大小为16字节的倍数
-    pub padding: u32,
+    /// 填充字节，确保头部大小正确
+    #[cfg(target_pointer_width = "64")]
+    pub padding: [u32; 3], // 64位系统需要12字节填充
+    
+    #[cfg(target_pointer_width = "32")]
+    pub padding: [u32; 5], // 32位系统需要20字节填充
 }
 
 /// 分配器统计信息

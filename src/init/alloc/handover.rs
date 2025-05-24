@@ -4,6 +4,9 @@
 use super::metadata::AllocStats;
 use crate::println;
 
+// 最大可跟踪的已分配块数量（与allocator.rs保持一致）
+pub const MAX_TRACKED_BLOCKS: usize = 256;
+
 /// 分配用途枚举
 /// 标记内存块的用途，便于内存管理系统接管后进行分类处理
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -60,7 +63,7 @@ impl AllocPurpose {
 
 /// 已分配块信息
 /// 记录一个已分配内存块的详细信息
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct AllocatedBlock {
     /// 内存块起始地址（用户数据地址）
     pub addr: usize,
@@ -103,8 +106,11 @@ pub struct HandoverInfo {
     /// 堆结束地址
     pub heap_end: usize,
     
-    /// 所有已分配的块
-    pub allocated_blocks: Vec<AllocatedBlock>,
+    /// 所有已分配的块（固定大小数组）
+    pub allocated_blocks: [AllocatedBlock; MAX_TRACKED_BLOCKS],
+    
+    /// 实际已分配块的数量
+    pub allocated_count: usize,
     
     /// 统计信息
     pub statistics: AllocStats,
@@ -118,30 +124,38 @@ impl HandoverInfo {
     
     /// 获取已分配块数量
     pub fn allocated_count(&self) -> usize {
-        self.allocated_blocks.len()
+        self.allocated_count
     }
     
     /// 获取已分配的总大小
     pub fn allocated_size(&self) -> usize {
-        self.allocated_blocks.iter().map(|b| b.size).sum()
+        let mut total = 0;
+        for i in 0..self.allocated_count {
+            total += self.allocated_blocks[i].size;
+        }
+        total
     }
     
     /// 获取可回收的内存大小
     pub fn reclaimable_size(&self) -> usize {
-        self.allocated_blocks
-            .iter()
-            .filter(|b| b.purpose.is_reclaimable())
-            .map(|b| b.size)
-            .sum()
+        let mut total = 0;
+        for i in 0..self.allocated_count {
+            if self.allocated_blocks[i].purpose.is_reclaimable() {
+                total += self.allocated_blocks[i].size;
+            }
+        }
+        total
     }
     
     /// 获取关键内存大小
     pub fn critical_size(&self) -> usize {
-        self.allocated_blocks
-            .iter()
-            .filter(|b| b.purpose.is_critical())
-            .map(|b| b.size)
-            .sum()
+        let mut total = 0;
+        for i in 0..self.allocated_count {
+            if self.allocated_blocks[i].purpose.is_critical() {
+                total += self.allocated_blocks[i].size;
+            }
+        }
+        total
     }
     
     /// 按用途分组统计
@@ -159,7 +173,8 @@ impl HandoverInfo {
             (AllocPurpose::TempBuffer, 0, 0),
         ];
         
-        for block in &self.allocated_blocks {
+        for i in 0..self.allocated_count {
+            let block = &self.allocated_blocks[i];
             for group in &mut groups {
                 if group.0 == block.purpose {
                     group.1 += 1;      // 计数
@@ -206,15 +221,16 @@ impl HandoverInfo {
         }
         
         // 检查所有块是否在堆范围内
-        for block in &self.allocated_blocks {
+        for i in 0..self.allocated_count {
+            let block = &self.allocated_blocks[i];
             if block.addr < self.heap_start || block.end_addr() > self.heap_end {
                 return Err("Block outside heap range");
             }
         }
         
         // 检查块是否重叠
-        for i in 0..self.allocated_blocks.len() {
-            for j in (i + 1)..self.allocated_blocks.len() {
+        for i in 0..self.allocated_count {
+            for j in (i + 1)..self.allocated_count {
                 let block1 = &self.allocated_blocks[i];
                 let block2 = &self.allocated_blocks[j];
                 
@@ -256,16 +272,21 @@ pub mod handover_utils {
     
     /// 将已分配块列表转换为内存映射
     /// 返回一个表示内存使用情况的位图（简化版本）
-    pub fn create_memory_map(blocks: &[AllocatedBlock], heap_start: usize, heap_size: usize) -> Vec<bool> {
+    /// 注意：由于no_std限制，返回固定大小的数组
+    pub fn create_memory_map(blocks: &[AllocatedBlock], block_count: usize, heap_start: usize, heap_size: usize) -> [bool; 256] {
         let page_size = 4096;
         let num_pages = (heap_size + page_size - 1) / page_size;
-        let mut map = vec![false; num_pages];
+        let mut map = [false; 256]; // 支持最多256个页面（1MB堆/4KB页）
         
-        for block in blocks {
+        // 确保不会超出数组边界
+        let max_pages = num_pages.min(256);
+        
+        for i in 0..block_count {
+            let block = &blocks[i];
             let start_page = (block.addr - heap_start) / page_size;
             let end_page = (block.end_addr() - heap_start + page_size - 1) / page_size;
             
-            for page in start_page..end_page.min(num_pages) {
+            for page in start_page..end_page.min(max_pages) {
                 map[page] = true;
             }
         }
@@ -274,26 +295,45 @@ pub mod handover_utils {
     }
     
     /// 查找指定地址所属的块
-    pub fn find_block_by_addr(blocks: &[AllocatedBlock], addr: usize) -> Option<&AllocatedBlock> {
-        blocks.iter().find(|b| b.contains(addr))
+    pub fn find_block_by_addr(blocks: &[AllocatedBlock], block_count: usize, addr: usize) -> Option<&AllocatedBlock> {
+        for i in 0..block_count {
+            if blocks[i].contains(addr) {
+                return Some(&blocks[i]);
+            }
+        }
+        None
     }
     
     /// 计算内存碎片度
     /// 返回0-100的值，0表示无碎片，100表示严重碎片
-    pub fn calculate_fragmentation(blocks: &[AllocatedBlock], heap_start: usize, heap_end: usize) -> u8 {
-        if blocks.is_empty() {
+    pub fn calculate_fragmentation(blocks: &[AllocatedBlock], block_count: usize, heap_start: usize, heap_end: usize) -> u8 {
+        if block_count == 0 {
             return 0;
         }
         
-        // 排序块列表
-        let mut sorted_blocks = blocks.to_vec();
-        sorted_blocks.sort_by_key(|b| b.addr);
+        // 创建一个临时的排序索引数组
+        let mut indices = [0usize; MAX_TRACKED_BLOCKS];
+        for i in 0..block_count {
+            indices[i] = i;
+        }
+        
+        // 简单的冒泡排序（因为no_std环境）
+        for i in 0..block_count {
+            for j in 0..block_count - 1 - i {
+                if blocks[indices[j]].addr > blocks[indices[j + 1]].addr {
+                    let temp = indices[j];
+                    indices[j] = indices[j + 1];
+                    indices[j + 1] = temp;
+                }
+            }
+        }
         
         // 计算空闲间隙数量
         let mut gaps = 0;
         let mut last_end = heap_start;
         
-        for block in &sorted_blocks {
+        for i in 0..block_count {
+            let block = &blocks[indices[i]];
             if block.addr > last_end {
                 gaps += 1;
             }
@@ -306,7 +346,7 @@ pub mod handover_utils {
         }
         
         // 碎片度 = (间隙数 / 块数) * 100
-        let fragmentation = (gaps as f32 / blocks.len() as f32) * 100.0;
+        let fragmentation = (gaps as f32 / block_count as f32) * 100.0;
         fragmentation.min(100.0) as u8
     }
 }

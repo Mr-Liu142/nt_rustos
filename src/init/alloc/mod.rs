@@ -8,9 +8,10 @@ pub mod handover;
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::{error_print, warn_print, info_print};
 
-pub use allocator::{EarlyAllocator, AllocError};
-pub use metadata::{AllocStats, BlockHeader, BlockStatus};
-pub use handover::{HandoverInfo, AllocatedBlock, AllocPurpose};
+// 从子模块导出类型
+pub use self::allocator::{EarlyAllocator, AllocError};
+pub use self::metadata::{AllocStats, BlockHeader, BlockStatus};
+pub use self::handover::{HandoverInfo, AllocatedBlock, AllocPurpose};
 
 // 全局早期分配器实例
 static mut EARLY_ALLOCATOR: Option<EarlyAllocator> = None;

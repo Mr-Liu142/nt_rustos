@@ -5,7 +5,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::{println, debug_print};
 use super::metadata::{BlockHeader, BlockStatus, AllocStats, BLOCK_MAGIC};
-use super::handover::{HandoverInfo, AllocatedBlock, AllocPurpose};
+use super::handover::{HandoverInfo, AllocatedBlock, AllocPurpose, MAX_TRACKED_BLOCKS};
 
 // 分配器错误类型
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -114,7 +114,14 @@ impl EarlyAllocator {
                 (*header).magic = BLOCK_MAGIC;
                 (*header).alloc_id = 0;
                 (*header).purpose = AllocPurpose::Unknown;
-                (*header).padding = 0;
+                #[cfg(target_pointer_width = "64")]
+                {
+                    (*header).padding = [0; 3];
+                }
+                #[cfg(target_pointer_width = "32")]
+                {
+                    (*header).padding = [0; 5];
+                }
             }
             
             // 添加到对应的空闲链表
@@ -296,21 +303,29 @@ impl EarlyAllocator {
     
     /// 准备接管信息
     pub fn prepare_handover(&mut self) -> HandoverInfo {
-        let mut allocated_blocks = Vec::new();
+        // 使用固定大小的数组来存储已分配块信息
+        let mut allocated_blocks = [AllocatedBlock {
+            addr: 0,
+            size: 0,
+            purpose: AllocPurpose::Unknown,
+            alloc_id: 0,
+        }; MAX_TRACKED_BLOCKS];
+        let mut block_count = 0;
         
         // 遍历所有块，收集已分配的块
         let mut current = self.heap_start;
         
-        while current < self.heap_end {
+        while current < self.heap_end && block_count < MAX_TRACKED_BLOCKS {
             let header = current as *const BlockHeader;
             unsafe {
                 if (*header).magic == BLOCK_MAGIC && (*header).status == BlockStatus::Allocated {
-                    allocated_blocks.push(AllocatedBlock {
+                    allocated_blocks[block_count] = AllocatedBlock {
                         addr: current + core::mem::size_of::<BlockHeader>(),
                         size: (*header).size,
                         purpose: (*header).purpose,
                         alloc_id: (*header).alloc_id,
-                    });
+                    };
+                    block_count += 1;
                 }
                 
                 if (*header).magic == BLOCK_MAGIC {
@@ -325,6 +340,7 @@ impl EarlyAllocator {
             heap_start: self.heap_start,
             heap_end: self.heap_end,
             allocated_blocks,
+            allocated_count: block_count,
             statistics: self.stats.clone(),
         }
     }
@@ -389,7 +405,14 @@ impl EarlyAllocator {
                 (*new_block).magic = BLOCK_MAGIC;
                 (*new_block).alloc_id = 0;
                 (*new_block).purpose = AllocPurpose::Unknown;
-                (*new_block).padding = 0;
+                #[cfg(target_pointer_width = "64")]
+                {
+                    (*new_block).padding = [0; 3];
+                }
+                #[cfg(target_pointer_width = "32")]
+                {
+                    (*new_block).padding = [0; 5];
+                }
                 
                 // 更新当前块的大小
                 (*current_block).size = new_size;
