@@ -2,6 +2,7 @@
 
 pub mod console_test;
 pub mod sbi_test;
+pub mod alloc_test;
 
 use crate::{println, info_print, warn_print, error_print};
 
@@ -119,6 +120,8 @@ pub fn run_all_tests() {
     
     // 运行SBI测试
     sbi_test::run_sbi_tests(&mut runner);
+
+    alloc_test::run_alloc_tests(&mut runner);
     
     // 打印最终总结
     runner.print_summary();
