@@ -30,9 +30,13 @@ impl EarlyGlobalAllocator {
         ALLOCATOR_INSTANCE.init(heap_start, heap_size)
     }
     
-    /// 设置分配用途（简化实现）
-    pub fn set_purpose(&self, _ptr: *mut u8, _purpose: AllocPurpose) -> Result<(), AllocError> {
-        Ok(())
+    /// 设置分配用途
+    pub fn set_purpose(&self, ptr: *mut u8, purpose: AllocPurpose) -> Result<(), AllocError> {
+        if let Some(non_null_ptr) = NonNull::new(ptr) {
+            ALLOCATOR_INSTANCE.set_purpose(non_null_ptr, purpose)
+        } else {
+            Err(AllocError::NullPointer)
+        }
     }
     
     /// 获取统计信息
@@ -57,7 +61,6 @@ impl EarlyGlobalAllocator {
     
     /// 安全的分配接口（带错误返回）
     pub fn safe_alloc(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
-        // 验证布局参数
         if layout.size() == 0 {
             return Err(AllocError::InvalidParameter);
         }
@@ -66,7 +69,6 @@ impl EarlyGlobalAllocator {
             return Err(AllocError::InvalidAlignment);
         }
         
-        // 检查大小是否合理（防止整数溢出）
         if layout.size() > isize::MAX as usize - layout.align() {
             return Err(AllocError::InvalidParameter);
         }
@@ -131,7 +133,6 @@ impl EarlyGlobalAllocator {
             return ptr::null_mut();
         }
         
-        // 分配新的内存
         let new_layout = match Layout::from_size_align(new_size, layout.align()) {
             Ok(l) => l,
             Err(_) => return ptr::null_mut(),
@@ -142,13 +143,11 @@ impl EarlyGlobalAllocator {
             return ptr::null_mut();
         }
         
-        // 复制数据
         unsafe {
             let copy_size = layout.size().min(new_size);
             ptr::copy_nonoverlapping(ptr, new_ptr, copy_size);
         }
         
-        // 释放旧内存
         unsafe {
             self.dealloc(ptr, layout);
         }
@@ -161,17 +160,12 @@ unsafe impl GlobalAlloc for EarlyGlobalAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         match ALLOCATOR_INSTANCE.alloc_aligned(layout.size(), layout.align()) {
             Some(ptr) => ptr.as_ptr(),
-            None => {
-                error_print!("Global allocation failed: size={}, align={}", 
-                           layout.size(), layout.align());
-                ptr::null_mut()
-            }
+            None => ptr::null_mut(),
         }
     }
     
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         if ptr.is_null() {
-            warn_print!("Attempt to deallocate null pointer");
             return;
         }
         
@@ -192,62 +186,27 @@ unsafe impl GlobalAlloc for EarlyGlobalAllocator {
     }
     
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if ptr.is_null() {
-            return self.alloc(Layout::from_size_align(new_size, layout.align()).unwrap_or(layout));
-        }
-        
-        if new_size == 0 {
-            self.dealloc(ptr, layout);
-            return ptr::null_mut();
-        }
-        
-        // 分配新的内存
-        let new_layout = match Layout::from_size_align(new_size, layout.align()) {
-            Ok(l) => l,
-            Err(_) => return ptr::null_mut(),
-        };
-        
-        let new_ptr = self.alloc(new_layout);
-        if new_ptr.is_null() {
-            return ptr::null_mut();
-        }
-        
-        // 复制数据
-        let copy_size = layout.size().min(new_size);
-        ptr::copy_nonoverlapping(ptr, new_ptr, copy_size);
-        
-        // 释放旧内存
-        self.dealloc(ptr, layout);
-        
-        new_ptr
+        self.realloc(ptr, layout, new_size)
     }
 }
 
-/// 内存分配错误处理函数
 #[alloc_error_handler]
 fn alloc_error_handler(layout: Layout) -> ! {
     error_print!("Memory allocation error!");
     error_print!("Requested: size={} bytes, align={}", layout.size(), layout.align());
     
-    // 尝试打印分配器状态
     if let Some(stats) = ALLOCATOR_INSTANCE.stats() {
         error_print!("Allocator stats:");
-        error_print!("  Total: {} KB", stats.total_size / 1024);
-        error_print!("  Used: {} KB ({}%)", stats.used_size / 1024, stats.usage_percent());
-        error_print!("  Free: {} KB", stats.free_size / 1024);
-        error_print!("  Allocations: {}", stats.total_allocs);
-        error_print!("  Fragmentation: {}%", stats.fragmentation_estimate());
+        stats.print_detailed();
     }
     
     panic!("Out of memory");
 }
 
-/// 高级分配接口（简化版本）
 pub mod advanced {
     use super::*;
     use core::mem;
     
-    /// 分配特定类型的内存
     pub fn alloc_type<T>() -> Option<NonNull<T>> {
         let layout = Layout::new::<T>();
         GLOBAL_EARLY_ALLOCATOR.safe_alloc(layout)
@@ -255,7 +214,6 @@ pub mod advanced {
             .map(|ptr| ptr.cast::<T>())
     }
     
-    /// 分配并初始化特定类型的内存
     pub fn alloc_init<T>(value: T) -> Option<NonNull<T>> {
         if let Some(ptr) = alloc_type::<T>() {
             unsafe {
@@ -267,85 +225,61 @@ pub mod advanced {
         }
     }
     
-    /// 智能指针分配器（简化版本）
-    // [修改] 为 EarlyBox 添加 #[derive(Debug)]
     #[derive(Debug)]
-    pub struct EarlyBox<T> {
+    pub struct EarlyBox<T: ?Sized> {
         ptr: NonNull<T>,
     }
     
     impl<T> EarlyBox<T> {
-        /// 在堆上分配值
         pub fn new(value: T) -> Option<Self> {
             alloc_init(value).map(|ptr| Self { ptr })
         }
-        
-        /// 泄露值，返回原始指针
-        pub fn leak(self) -> NonNull<T> {
-            let ptr = self.ptr;
-            mem::forget(self);
+    }
+
+    impl<T: ?Sized> EarlyBox<T> {
+        pub fn leak(b: Self) -> NonNull<T> {
+            let ptr = b.ptr;
+            mem::forget(b);
             ptr
         }
-        
-        /// 获取引用
-        pub fn as_ref(&self) -> &T {
-            unsafe { self.ptr.as_ref() }
-        }
-        
-        /// 获取可变引用
-        pub fn as_mut(&mut self) -> &mut T {
-            unsafe { self.ptr.as_mut() }
-        }
-        
-        /// 设置分配用途
+
         pub fn set_purpose(&self, purpose: AllocPurpose) -> Result<(), AllocError> {
-            GLOBAL_EARLY_ALLOCATOR.set_purpose(self.ptr.as_ptr() as *mut u8, purpose)
-        }
-    }
-    
-    impl<T> Drop for EarlyBox<T> {
-        fn drop(&mut self) {
             unsafe {
-                // 先调用析构函数
-                ptr::drop_in_place(self.ptr.as_ptr());
-                // 然后释放内存（简化实现：实际上不释放）
+                 GLOBAL_EARLY_ALLOCATOR.set_purpose(self.ptr.as_ptr() as *mut u8, purpose)
             }
         }
     }
     
-    impl<T> core::ops::Deref for EarlyBox<T> {
+    impl<T: ?Sized> Drop for EarlyBox<T> {
+        fn drop(&mut self) {
+            unsafe {
+                let layout = Layout::for_value(self.ptr.as_ref());
+                ptr::drop_in_place(self.ptr.as_ptr());
+                GLOBAL_EARLY_ALLOCATOR.dealloc(self.ptr.as_ptr() as *mut u8, layout);
+            }
+        }
+    }
+    
+    impl<T: ?Sized> core::ops::Deref for EarlyBox<T> {
         type Target = T;
-        
         fn deref(&self) -> &Self::Target {
-            self.as_ref()
+            unsafe { self.ptr.as_ref() }
         }
     }
     
-    impl<T> core::ops::DerefMut for EarlyBox<T> {
+    impl<T: ?Sized> core::ops::DerefMut for EarlyBox<T> {
         fn deref_mut(&mut self) -> &mut Self::Target {
-            self.as_mut()
+            unsafe { self.ptr.as_mut() }
         }
     }
     
-    /// 简单的Vec实现（使用标准库的Vec）
     pub type EarlyVec<T> = alloc::vec::Vec<T>;
 }
 
-/// 便捷宏
 #[macro_export]
 macro_rules! early_vec {
-    () => {
-        alloc::vec::Vec::new()
-    };
-    ($($x:expr),+ $(,)?) => {
-        {
-            let mut vec = alloc::vec::Vec::new();
-            $(
-                vec.push($x);
-            )+
-            vec
-        }
-    };
+    () => { alloc::vec::Vec::new() };
+    ($($x:expr),+ $(,)?) => { { let mut vec = alloc::vec::Vec::new(); $( vec.push($x); )+ vec } };
 }
 
 #[macro_export]
