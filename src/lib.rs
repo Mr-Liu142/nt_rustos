@@ -4,6 +4,7 @@
 // 导出核心模块
 pub mod console;
 pub mod util;
+pub mod init;
 pub mod test;  // 直接包含测试模块，无条件编译
 
 use core::panic::PanicInfo;
@@ -55,6 +56,32 @@ pub fn init() {
     info_print!("NT RustOS starting...");
     info_print!("Stack size: {} bytes", STACK_SIZE);
     info_print!("BSS cleared successfully");
+    
+    // 初始化早期分配器
+    // 假设在BSS段之后有1MB空间可用于早期堆
+    extern "C" {
+        fn end(); // 链接器提供的内核结束地址
+    }
+    
+    let heap_start = unsafe { end as usize };
+    let heap_start_aligned = (heap_start + 0xF) & !0xF; // 16字节对齐
+    let heap_size = 1024 * 1024; // 1MB
+    
+    match init::alloc::init(heap_start_aligned, heap_size) {
+        Ok(_) => {
+            info_print!("Early allocator initialized at 0x{:x}", heap_start_aligned);
+            
+            // 打印早期分配器状态
+            if let Some(stats) = init::alloc::stats() {
+                info_print!("Early heap: {} KB available", stats.free_size / 1024);
+            }
+        }
+        Err(e) => {
+            error_print!("Failed to initialize early allocator: {:?}", e);
+            // 早期分配器初始化失败是致命错误
+            panic!("Cannot continue without early allocator");
+        }
+    }
     
     // 显示SBI系统信息
     util::sbi::info::print_sbi_info();
