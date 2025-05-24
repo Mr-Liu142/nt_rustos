@@ -66,18 +66,23 @@ fn panic(info: &PanicInfo) -> ! {
     }
 }
 
-/// 清除BSS段
-pub unsafe fn clear_bss() {
+/// 安全地清空BSS段，但跳过指定的栈区域
+pub unsafe fn clear_bss(stack_bottom: usize, stack_top: usize) {
     extern "C" {
         fn sbss();
         fn ebss();
     }
     
-    let sbss_addr = sbss as usize;
-    let ebss_addr = ebss as usize;
+    let bss_start = sbss as usize;
+    let bss_end = ebss as usize;
     
-    // 逐字节清零BSS段
-    for addr in sbss_addr..ebss_addr {
+    // 清理从 BSS 开始到栈底的区域
+    for addr in bss_start..stack_bottom {
+        core::ptr::write_volatile(addr as *mut u8, 0);
+    }
+    
+    // 清理从栈顶到 BSS 结束的区域
+    for addr in stack_top..bss_end {
         core::ptr::write_volatile(addr as *mut u8, 0);
     }
 }

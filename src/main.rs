@@ -13,20 +13,19 @@ static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 #[link_section = ".text.entry"]
 fn _start() -> ! {
     unsafe {
-        // 设置栈指针到栈顶
-        let stack_top = STACK.as_ptr().add(STACK_SIZE);
+        // 定义栈的边界
+        let stack_bottom = STACK.as_ptr() as usize;
+        let stack_top = stack_bottom + STACK_SIZE;
+        
+        // 关键：首先设置栈指针，这样我们才能执行Rust代码
         asm!(
             "mv sp, {0}",
             in(reg) stack_top,
         );
         
-        // 清除BSS段 - 将未初始化的静态变量清零
-        // 
-        // **[修复]** 移除此调用。
-        // 在当前设置下，STACK位于BSS段内。
-        // 在设置完栈指针后清空BSS，会破坏当前正在使用的栈，导致系统崩溃重启。
-        // 加载器(如QEMU)通常会为我们自动清零BSS段，所以此调用是冗余且有害的。
-        // clear_bss();
+        // 关键：安全地清空BSS段，同时绕过栈区域。
+        // 这是一个健壮内核的必要步骤，以防加载器未完成此工作。
+        clear_bss(stack_bottom, stack_top);
         
         // 跳转到Rust主函数
         rust_main();
